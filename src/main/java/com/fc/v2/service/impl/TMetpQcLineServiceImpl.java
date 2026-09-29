@@ -1,6 +1,7 @@
 package com.fc.v2.service.impl;
 
 import java.math.BigDecimal;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
@@ -21,6 +22,12 @@ import com.fc.v2.service.ITMetpQcLineService;
 @Service
 public class TMetpQcLineServiceImpl implements ITMetpQcLineService {
 
+    /** 界限情形：已停用 */
+    private static final int RULE_STATUS_DISABLED = 1;
+    /** 输入合法闭区间：[0, 100] */
+    private static final BigDecimal INPUT_MIN = BigDecimal.ZERO;
+    private static final BigDecimal INPUT_MAX = new BigDecimal("100");
+
     /** 优先级降序；并列按 ruleCode 降序（确定性） */
     private static final Comparator<TMetpQcLine> PRIORITY_THEN_CODE_DESC = new Comparator<TMetpQcLine>() {
         @Override
@@ -36,17 +43,27 @@ public class TMetpQcLineServiceImpl implements ITMetpQcLineService {
         }
     };
 
+    /** 同代号多版本并存时，启用之日更晚者优先（null 视为最早） */
+    private static final Comparator<TMetpQcLine> START_DESC = new Comparator<TMetpQcLine>() {
+        @Override
+        public int compare(TMetpQcLine a, TMetpQcLine b) {
+            Date sa = a.getEffStart();
+            Date sb = b.getEffStart();
+            if (sa == null && sb == null) {
+                return 0;
+            }
+            if (sa == null) {
+                return 1;
+            }
+            if (sb == null) {
+                return -1;
+            }
+            return sb.compareTo(sa);
+        }
+    };
+
     @javax.annotation.Resource
     private TMetpQcLineMapper metpQcLineMapper;
-
-    /**
-     * 时段比较统一走**墙钟字符串**（yyyy-MM-dd HH:mm:ss）+ 字符串绑定：
-     * JDBC 的 serverTimezone 与本机时区不对称，直接把 java.util.Date 作参数会整体偏移，
-     * 使边界判定在"切换当日"这类用例上随机错档（实测踩到）。
-     */
-    private static String ts(Date d) {
-        return new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(d);
-    }
 
     @Override
     public TMetpQcLine selectTMetpQcLineById(Long id) {
@@ -58,7 +75,16 @@ public class TMetpQcLineServiceImpl implements ITMetpQcLineService {
         if (at == null) {
             return new java.util.ArrayList<TMetpQcLine>();
         }
-        return this.metpQcLineMapper.selectList(new QueryWrapper<TMetpQcLine>().eq("del_flag", 0));
+        List<TMetpQcLine> all = this.metpQcLineMapper.selectList(new QueryWrapper<TMetpQcLine>()
+                .eq("del_flag", 0));
+        List<TMetpQcLine> avail = new java.util.ArrayList<TMetpQcLine>();
+        for (TMetpQcLine r : all) {
+            if (inEffect(r, at)) {
+                avail.add(r);
+            }
+        }
+        Collections.sort(avail, PRIORITY_THEN_CODE_DESC);
+        return avail;
     }
 
     @Override
@@ -66,7 +92,13 @@ public class TMetpQcLineServiceImpl implements ITMetpQcLineService {
         if (ruleCode == null || ruleCode.trim().isEmpty() || input == null || at == null) {
             return 0;
         }
+        if (!inputInRange(input)) {
+            return 0;
+        }
         TMetpQcLine rule = findRule(ruleCode, at);
+        if (rule == null) {
+            return 0;
+        }
         return levelOf(rule, input);
     }
 
@@ -75,8 +107,7 @@ public class TMetpQcLineServiceImpl implements ITMetpQcLineService {
         if (input == null || at == null) {
             return 0;
         }
-        if (input.compareTo(BigDecimal.ZERO) < 0
-                || input.compareTo(new BigDecimal("100")) > 0) {
+        if (!inputInRange(input)) {
             return 0;
         }
         List<TMetpQcLine> avail = listAvailable(at);
@@ -92,7 +123,7 @@ public class TMetpQcLineServiceImpl implements ITMetpQcLineService {
             return false;
         }
         TMetpQcLine r = this.metpQcLineMapper.selectById(id);
-        return r != null;
+        return r != null && inEffect(r, at);
     }
 
     @Override
@@ -100,49 +131,55 @@ public class TMetpQcLineServiceImpl implements ITMetpQcLineService {
         if (at == null) {
             return 0;
         }
-        return this.metpQcLineMapper
-                .selectList(new QueryWrapper<TMetpQcLine>().eq("del_flag", 0)).size();
+        return listAvailable(at).size();
     }
 
     private TMetpQcLine findRule(String ruleCode, Date at) {
         List<TMetpQcLine> hit = this.metpQcLineMapper.selectList(new QueryWrapper<TMetpQcLine>()
                 .eq("del_flag", 0).eq("rule_code", ruleCode));
-        TMetpQcLine newest = null;
+        TMetpQcLine picked = null;
         for (TMetpQcLine r : hit) {
-            if (newest == null || r.getEffEnd() == null) {
-                newest = r;
-            } else if (newest.getEffEnd() != null && r.getEffEnd().after(newest.getEffEnd())) {
-                newest = r;
+            if (!inEffect(r, at)) {
+                continue;
+            }
+            if (picked == null || START_DESC.compare(r, picked) < 0) {
+                picked = r;
             }
         }
-        return newest;
+        return picked;
     }
 
-    /** 阈值解析：档案为主、明细覆盖；两者皆缺返回 null（调用方按不可用处理），精度统一 2 位 */
-    private BigDecimal resolveLimit(TMetpQcLine r, int tier) {
-        if (tier == 1) {
-            return r.getTh1Max();
+    /**
+     * at 时刻是否落在生效半开区间 [eff_start, eff_end)：启用之日含、交棒之日不含；
+     * 任一端未维护视为该端无界；已停用 / 已删除不在册。
+     * 区间比较只在内存中进行（Date 直绑 JDBC 会因 serverTimezone 不对称整体偏移）。
+     */
+    private boolean inEffect(TMetpQcLine r, Date at) {
+        if (r.getStatus() != null && r.getStatus() == RULE_STATUS_DISABLED) {
+            return false;
         }
-        if (tier == 2) {
-            return r.getTh2Max();
+        if (r.getEffStart() != null && at.before(r.getEffStart())) {
+            return false;
         }
-        return r.getTh3Max();
+        if (r.getEffEnd() != null && !at.before(r.getEffEnd())) {
+            return false;
+        }
+        return true;
     }
 
-    /** 档案级默认阈值（明细未维护时的回退来源） */
-    private BigDecimal defaultThreshold(TMetpQcLine r, int tier) {
-        return r.getTh1Max();
+    private boolean inputInRange(BigDecimal input) {
+        return input.compareTo(INPUT_MIN) >= 0 && input.compareTo(INPUT_MAX) <= 0;
     }
 
-    /** 分档：等于上限取高一档 */
+    /** 分档：等于上限取高一档；阈值未维护的档跳过 */
     private int levelOf(TMetpQcLine rule, BigDecimal input) {
-        if (rule.getTh1Max() != null && input.compareTo(rule.getTh1Max()) <= 0) {
+        if (rule.getTh1Max() != null && input.compareTo(rule.getTh1Max()) < 0) {
             return 1;
         }
-        if (rule.getTh2Max() != null && input.compareTo(rule.getTh2Max()) <= 0) {
+        if (rule.getTh2Max() != null && input.compareTo(rule.getTh2Max()) < 0) {
             return 2;
         }
-        if (rule.getTh3Max() != null && input.compareTo(rule.getTh3Max()) <= 0) {
+        if (rule.getTh3Max() != null && input.compareTo(rule.getTh3Max()) < 0) {
             return 3;
         }
         return 4;

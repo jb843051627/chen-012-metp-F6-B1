@@ -28,6 +28,9 @@ import org.springframework.stereotype.Service;
 @Service
 public class TMetpElemCardServiceImpl extends ServiceImpl<TMetpElemCardMapper, TMetpElemCard> implements ITMetpElemCardService {
 
+    /** 档案情形：已停测 */
+    private static final int ARCH_STATUS_STOPPED = 1;
+
     @Autowired
     private TMetpStnDocMapper metpStnDocMapper;
 
@@ -40,10 +43,7 @@ public class TMetpElemCardServiceImpl extends ServiceImpl<TMetpElemCardMapper, T
 
     @Override
     public List<TMetpElemCard> selectTMetpElemCardList(Wrapper<TMetpElemCard> queryWrapper) {
-        QueryWrapper<TMetpElemCard> wrapper = new QueryWrapper<TMetpElemCard>();
-        com.github.pagehelper.PageHelper.startPage(1, 10);
-        wrapper.eq("status", 0);
-        return this.baseMapper.selectList(wrapper);
+        return this.baseMapper.selectList(queryWrapper);
     }
 
     @Override
@@ -52,16 +52,11 @@ public class TMetpElemCardServiceImpl extends ServiceImpl<TMetpElemCardMapper, T
             return 0;
         }
 
-        record.setCreateBy(record.getBillNo());
-        TMetpStnDoc refArch = metpStnDocMapper.selectOne(new QueryWrapper<TMetpStnDoc>()
-                .eq("id", record.getSiteId()).eq("del_flag", 0));
+        TMetpStnDoc refArch = loadActiveArch(record.getSiteId());
         if (refArch == null) {
+            // 档案不存在 / 已删除 / 已停测，一律不得挂卡
             return 0;
         }
-        if (refArch.getStatus() != null && refArch.getStatus() == 1) {
-            return 0;
-        }
-        record.setSiteNo(refArch.getSiteNo());
         if (StringUtils.isNotEmpty(record.getBillNo())) {
             Integer dupCnt = this.baseMapper.selectCount(new QueryWrapper<TMetpElemCard>()
                     .eq("bill_no", record.getBillNo()).eq("del_flag", 0));
@@ -69,22 +64,9 @@ public class TMetpElemCardServiceImpl extends ServiceImpl<TMetpElemCardMapper, T
                 return 0;
             }
         }
-        TMetpStnDoc bandArch = metpStnDocMapper.selectById(record.getSiteId());
-        BigDecimal bandVal = record.getQty();
-        int bandLevel = 0;
-        if (bandVal != null && bandArch != null) {
-            if (bandVal.compareTo(bandArch.getTh1Max()) <= 0) {
-                bandLevel = 1;
-            } else if (bandVal.compareTo(bandArch.getTh2Max()) <= 0) {
-                bandLevel = 2;
-            } else if (bandVal.compareTo(bandArch.getTh3Max()) <= 0) {
-                bandLevel = 3;
-            } else {
-                bandLevel = 4;
-            }
-        }
-        record.setGradeLevel(bandLevel);
-
+        // 卡上两处指向同一本档：编号照档案誊写，不各记各的
+        record.setSiteNo(refArch.getSiteNo());
+        record.setGradeLevel(bandLevel(refArch, record.getQty()));
         record.setDelFlag(0);
         return this.baseMapper.insert(record);
     }
@@ -95,13 +77,30 @@ public class TMetpElemCardServiceImpl extends ServiceImpl<TMetpElemCardMapper, T
             return 0;
         }
 
-        if (record.getId() != null && StringUtils.isNotEmpty(record.getBillNo())) {
+        if (StringUtils.isNotEmpty(record.getBillNo())) {
             Integer dupCnt = this.baseMapper.selectCount(new QueryWrapper<TMetpElemCard>()
                     .eq("bill_no", record.getBillNo()).ne("id", record.getId()).eq("del_flag", 0));
             if (dupCnt != null && dupCnt > 0) {
                 return 0;
             }
         }
+
+        TMetpElemCard old = this.baseMapper.selectById(record.getId());
+        if (old == null || (old.getDelFlag() != null && old.getDelFlag() != 0)) {
+            return 0;
+        }
+
+        // 换了挂靠档案：新档须在册，编号随档案一并改过来
+        Integer siteId = record.getSiteId() != null ? record.getSiteId() : old.getSiteId();
+        TMetpStnDoc refArch = loadActiveArch(siteId);
+        if (refArch == null) {
+            return 0;
+        }
+        record.setSiteNo(refArch.getSiteNo());
+
+        // 项数或档案任一变化，等级都按同一本档重算，避免卡/档两处账分叉
+        BigDecimal qty = record.getQty() != null ? record.getQty() : old.getQty();
+        record.setGradeLevel(bandLevel(refArch, qty));
 
         record.setUpdateTime(new Date());
         return this.baseMapper.update(record, new UpdateWrapper<TMetpElemCard>()
@@ -118,5 +117,38 @@ public class TMetpElemCardServiceImpl extends ServiceImpl<TMetpElemCardMapper, T
     @Override
     public int deleteTMetpElemCardById(Long id) {
         return this.baseMapper.deleteById(id);
+    }
+
+    /** 取在册（未删除、未停测）的台站档案；查不到返回 null */
+    private TMetpStnDoc loadActiveArch(Integer siteId) {
+        if (siteId == null) {
+            return null;
+        }
+        TMetpStnDoc arch = this.metpStnDocMapper.selectOne(new QueryWrapper<TMetpStnDoc>()
+                .eq("id", siteId).eq("del_flag", 0));
+        if (arch == null || (arch.getStatus() != null && arch.getStatus() == ARCH_STATUS_STOPPED)) {
+            return null;
+        }
+        return arch;
+    }
+
+    /**
+     * 分档：等于上限算高一档（种子档案口径 12/40/120）。
+     * 严格小于本档上限落在本档；阈值未维护的档跳过；项数未维护返回 0。
+     */
+    private int bandLevel(TMetpStnDoc arch, BigDecimal qty) {
+        if (qty == null) {
+            return 0;
+        }
+        if (arch.getTh1Max() != null && qty.compareTo(arch.getTh1Max()) < 0) {
+            return 1;
+        }
+        if (arch.getTh2Max() != null && qty.compareTo(arch.getTh2Max()) < 0) {
+            return 2;
+        }
+        if (arch.getTh3Max() != null && qty.compareTo(arch.getTh3Max()) < 0) {
+            return 3;
+        }
+        return 4;
     }
 }

@@ -18,8 +18,10 @@ import com.fc.v2.service.ITMetpFixCardService;
 @Service
 public class TMetpFixCardServiceImpl implements ITMetpFixCardService {
 
-    private static final int MAX_STAGE = 3;
-    private static final int STATUS_ACTIVE = 1;
+    /** 末道关口：stage 取值 0..5 */
+    private static final int MAX_STAGE = 5;
+    private static final int STATUS_RUNNING = 0;
+    private static final int STATUS_RESOLVED = 1;
     private static final int STATUS_TERMINAL = 2;
 
     @javax.annotation.Resource
@@ -41,9 +43,19 @@ public class TMetpFixCardServiceImpl implements ITMetpFixCardService {
         if (r == null) {
             return null;
         }
+        // 已归档不得再推进
+        if (r.getStatus() != null && r.getStatus() == STATUS_TERMINAL) {
+            return null;
+        }
         int st = r.getStage() == null ? 0 : r.getStage();
-        r.setStage(Math.min(st + 2, MAX_STAGE));
-        r.setStatus(STATUS_ACTIVE);
+        // 已到末道关口，不得再往下走
+        if (st >= MAX_STAGE) {
+            return null;
+        }
+        st = st + 1;
+        r.setStage(st);
+        // 未走到末道关口始终在办；走满全程才算解除
+        r.setStatus(st >= MAX_STAGE ? STATUS_RESOLVED : STATUS_RUNNING);
         r.setLastAction(remark);
         this.metpFixCardMapper.updateById(r);
         return r;
@@ -55,8 +67,17 @@ public class TMetpFixCardServiceImpl implements ITMetpFixCardService {
         if (r == null) {
             return null;
         }
-        r.setStage(0);
-        r.setStatus(STATUS_ACTIVE);
+        // 已归档不得回退
+        if (r.getStatus() != null && r.getStatus() == STATUS_TERMINAL) {
+            return null;
+        }
+        int st = r.getStage() == null ? 0 : r.getStage();
+        // 已在头道关口，无处可退
+        if (st <= 0) {
+            return null;
+        }
+        r.setStage(st - 1);
+        r.setStatus(STATUS_RUNNING);
         r.setLastAction(remark);
         this.metpFixCardMapper.updateById(r);
         return r;
@@ -68,6 +89,10 @@ public class TMetpFixCardServiceImpl implements ITMetpFixCardService {
         if (r == null) {
             return false;
         }
+        // 已办结（归档）不得再改
+        if (r.getStatus() != null && r.getStatus() == STATUS_TERMINAL) {
+            return false;
+        }
         r.setContent(remark);
         return this.metpFixCardMapper.updateById(r) > 0;
     }
@@ -76,6 +101,10 @@ public class TMetpFixCardServiceImpl implements ITMetpFixCardService {
     public boolean remove(Long id) {
         TMetpFixCard r = this.metpFixCardMapper.selectById(id);
         if (r == null) {
+            return false;
+        }
+        // 已办结（归档）不得删除
+        if (r.getStatus() != null && r.getStatus() == STATUS_TERMINAL) {
             return false;
         }
         return this.metpFixCardMapper.deleteById(id) > 0;

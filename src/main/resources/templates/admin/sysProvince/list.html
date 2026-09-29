@@ -79,6 +79,11 @@ function streetList(){
         form.on('select(province_select)', function(data){
             $("#city_select").empty();
             $("#city_select").html("<option></option>");
+            // 省换了，市以下的区、街道须一同清空，避免残留旧选
+            $("#area_select").empty();
+            $("#area_select").html("<option></option>");
+            $("#street_select").empty();
+            $("#street_select").html("<option></option>");
             $.ajax({
                 type: 'get',
                 dataType: 'json',
@@ -96,6 +101,9 @@ function streetList(){
         form.on('select(city_select)', function(data){
           $("#area_select").empty();
           $("#area_select").html("<option></option>");
+          // 市换了，区以下的街道须一同清空，避免残留旧选
+          $("#street_select").empty();
+          $("#street_select").html("<option></option>");
           $.ajax({
               type: 'get',
               dataType: 'json',

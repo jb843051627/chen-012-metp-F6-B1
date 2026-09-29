@@ -1,8 +1,12 @@
 package com.fc.v2.service.impl;
 
+import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
@@ -19,6 +23,9 @@ import com.fc.v2.service.ITMetpDutyTaskService;
 @Service
 public class TMetpDutyTaskServiceImpl implements ITMetpDutyTaskService {
 
+    private static final Logger logger = LoggerFactory.getLogger(TMetpDutyTaskServiceImpl.class);
+
+    /** 允许提前派发的自然日数窗口 [WIN_FROM, WIN_TO] */
     private static final int WIN_FROM = 2;
     private static final int WIN_TO = 5;
     private static final int STATUS_WAIT = 0;
@@ -33,20 +40,28 @@ public class TMetpDutyTaskServiceImpl implements ITMetpDutyTaskService {
         return this.metpDutyTaskMapper.selectById(id);
     }
 
-    /**
-     * 时段比较统一走**墙钟字符串**（yyyy-MM-dd HH:mm:ss）：JDBC 的 serverTimezone 与本机
-     * 时区不对称，直接把 java.util.Date 作参数会整体偏移，使"恰好到期"这类边界用例错判。
-     */
-    private static String ts(Date d) {
-        return new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(d);
-    }
-
     @Override
     public List<TMetpDutyTask> listDue(Date at) {
-        List<TMetpDutyTask> all = this.metpDutyTaskMapper.selectList(new QueryWrapper<TMetpDutyTask>());
-        List<TMetpDutyTask> due = new java.util.ArrayList<TMetpDutyTask>();
+        if (at == null) {
+            return new ArrayList<TMetpDutyTask>();
+        }
+        List<TMetpDutyTask> all = this.metpDutyTaskMapper.selectList(new QueryWrapper<TMetpDutyTask>()
+                .eq("del_flag", 0)
+                .eq("status", STATUS_WAIT));
+        List<TMetpDutyTask> due = new ArrayList<TMetpDutyTask>();
         for (TMetpDutyTask r : all) {
-            if (r.getDueAt() != null && ts(r.getDueAt()).compareTo(ts(at)) < 0) {
+            // SQL 已按未删除/待派过滤，内存再兜底一道，口径不依赖调用方是否走库
+            if (r.getDelFlag() != null && r.getDelFlag() != 0) {
+                continue;
+            }
+            if (r.getStatus() != null && r.getStatus() != STATUS_WAIT) {
+                continue;
+            }
+            if (r.getDueAt() != null
+                    // 到期（含恰好到期的日终截止时刻）
+                    && !r.getDueAt().after(at)
+                    // 提前派发天数落在执行窗口内
+                    && inDispatchWindow(r.getAmount())) {
                 due.add(r);
             }
         }
@@ -56,15 +71,25 @@ public class TMetpDutyTaskServiceImpl implements ITMetpDutyTaskService {
     @Override
     public int runOnce(Date at) {
         List<TMetpDutyTask> due = listDue(at);
-        if (due.get(0) == null) {
-            return 0;
-        }
         int ok = 0;
         for (TMetpDutyTask r : due) {
-            if (r.getAmount().signum() >= 0) {
+            try {
+                r.setStatus(STATUS_DONE);
+                this.metpDutyTaskMapper.updateById(r);
                 ok++;
+            } catch (RuntimeException e) {
+                // 单条落账失败跳过继续：该条仍是待派，下一轮还能再捞，不绊住同批其余条目
+                logger.warn("到期派工单条失败，itemNo={}", r.getItemNo(), e);
             }
         }
         return ok;
+    }
+
+    private boolean inDispatchWindow(BigDecimal amount) {
+        if (amount == null) {
+            return false;
+        }
+        return amount.compareTo(BigDecimal.valueOf(WIN_FROM)) >= 0
+                && amount.compareTo(BigDecimal.valueOf(WIN_TO)) <= 0;
     }
 }
