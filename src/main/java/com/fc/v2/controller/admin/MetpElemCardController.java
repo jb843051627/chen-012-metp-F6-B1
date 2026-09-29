@@ -45,6 +45,10 @@ public class MetpElemCardController extends BaseController {
     @ResponseBody
     public ResultTable list(TMetpElemCard record) {
         QueryWrapper<TMetpElemCard> queryWrapper = new QueryWrapper<TMetpElemCard>();
+        queryWrapper.eq("del_flag", 0);
+        queryWrapper.eq(record.getStatus() != null, "status", record.getStatus());
+        queryWrapper.eq(record.getSiteId() != null, "site_id", record.getSiteId());
+        queryWrapper.eq(com.fc.v2.util.StringUtils.isNotEmpty(record.getBillNo()), "bill_no", record.getBillNo());
         startPage();
         com.github.pagehelper.PageInfo<TMetpElemCard> page =
                 new com.github.pagehelper.PageInfo<TMetpElemCard>(metpElemCardService.selectTMetpElemCardList(queryWrapper));

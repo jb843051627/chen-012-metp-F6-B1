@@ -40,7 +40,7 @@ public class TMetpElemCard implements Serializable {
     /** 所属气象台站基础档案 */
     @TableField("site_id")
     @ApiModelProperty(value = "所属气象台站基础档案")
-    private Integer siteId;
+    private Long siteId;
 
     /** 气象台站编号 */
     @TableField("site_no")
@@ -115,11 +115,11 @@ public class TMetpElemCard implements Serializable {
         this.billNo = billNo;
     }
 
-    public Integer getSiteId() {
+    public Long getSiteId() {
         return siteId;
     }
 
-    public void setSiteId(Integer siteId) {
+    public void setSiteId(Long siteId) {
         this.siteId = siteId;
     }
 

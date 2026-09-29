@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS t_metp_duty_task (
 CREATE TABLE IF NOT EXISTS t_metp_elem_card (
   id bigint NOT NULL COMMENT '主键',
   bill_no varchar(64) DEFAULT NULL COMMENT '观测要素挂用卡号',
-  site_id int DEFAULT NULL COMMENT '所属气象台站基础档案',
+  site_id bigint DEFAULT NULL COMMENT '所属气象台站基础档案(关联 t_metp_stn_doc.id)',
   site_no varchar(64) DEFAULT NULL COMMENT '气象台站编号',
   qty decimal(12,2) DEFAULT NULL COMMENT '本卡三源合并后在册要素项数(项)',
   fine_amt decimal(12,2) DEFAULT NULL COMMENT '本年度新增要素项数(项)',
@@ -123,7 +123,6 @@ CREATE TABLE IF NOT EXISTS t_metp_submit_row (
   PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='正点观测数据核收转存行';
 
--- 初始档案数据（id=1 启用 / id=2 停用）
 -- 两条初始档案：id=0 在册、id=1 已停测。
 -- 在册观测要素项数上限取 12/40/120 项（等于上限算高一档）。
 INSERT IGNORE INTO t_metp_stn_doc (id, site_no, site_name, site_type, road_name, th1_max, th2_max, th3_max, status, del_flag, create_by, create_time)
